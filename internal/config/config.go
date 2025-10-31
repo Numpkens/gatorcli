@@ -5,65 +5,58 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/mitchellh/go-homedir"
 )
 
-const configFileName = ".gatorconfig.json"
-
 type Config struct {
-	DBURL           string `json:"db_url"`
+	DatabaseURL     string `json:"database_url"`
 	CurrentUserName string `json:"current_user_name"`
 }
 
-func getConfigFilePath() (string, error) {
-	homeDir, err := os.UserHomeDir()
+const FileName = ".gatorconfig.json"
+
+func configPath() (string, error) {
+	home, err := homedir.Dir()
 	if err != nil {
-		return "", fmt.Errorf("could not get home directory: %w", err)
+		return "", fmt.Errorf("could not find home directory: %w", err)
 	}
-	return filepath.Join(homeDir, configFileName), nil
+
+	return filepath.Join(home, FileName), nil
 }
 
-func write(cfg Config) error {
-	path, err := getConfigFilePath()
+func LoadConfig() (*Config, error) {
+	path, err := configPath()
 	if err != nil {
-		return fmt.Errorf("failed to get config file path for writing: %w", err)
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal config to JSON: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return fmt.Errorf("failed to write config file %s: %w", path, err)
-	}
-
-	return nil
-}
-
-func Read() (Config, error) {
-	var cfg Config
-
-	path, err := getConfigFilePath()
-	if err != nil {
-		return cfg, fmt.Errorf("failed to get config file path for reading: %w", err)
+		return nil, err
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return cfg, fmt.Errorf("failed to read config file %s: %w", path, err)
+		return nil, fmt.Errorf("could not read config file %s: %w", path, err)
 	}
 
+	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("failed to unmarshal JSON into config struct: %w", err)
+		return nil, fmt.Errorf("could not unmarshal config data: %w", err)
 	}
 
-	return cfg, nil
+	return &cfg, nil
 }
 
-func (cfg *Config) SetUser(username string) error {
-	cfg.CurrentUserName = username
+func (c *Config) Save() error {
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
 
-	if err := write(*cfg); err != nil {
-		return fmt.Errorf("failed to write updated config: %w", err)
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Errorf("could not marshal config data: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("could not write config file %s: %w", path, err)
 	}
 
 	return nil

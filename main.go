@@ -1,91 +1,118 @@
 package main
 
 import (
-	"errors"
+	"context"
+	"database/sql"
 	"fmt"
+	"github.com/Numpkens/gatorcli/internal/config"
+	"github.com/Numpkens/gatorcli/internal/database"
+	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 	"log"
 	"os"
-	"strings"
-
-	"github.com/Numpkens/gatorcli/internal/config"
+	"time"
 )
 
 type state struct {
-	Config *config.Config
-}
-
-type command struct {
-	Name string
-	Args []string
-}
-
-type commandHandlerFunc func(s *state, cmd command) error
-
-type commands struct {
-	Handlers map[string]commandHandlerFunc
-}
-
-func handlerLogin(s *state, cmd command) error {
-	if len(cmd.Args) == 0 {
-		return errors.New("login command requires a single argument: <username>")
-	}
-
-	username := cmd.Args[0]
-
-	if err := s.Config.SetUser(username); err != nil {
-		return fmt.Errorf("failed to set current user: %w", err)
-	}
-
-	fmt.Printf("Current user has been successfully set to: %s\n", username)
-
-	return nil
-}
-
-func (c *commands) run(s *state, cmd command) error {
-	handler, ok := c.Handlers[cmd.Name]
-	if !ok {
-		return fmt.Errorf("unknown command: %s", cmd.Name)
-	}
-
-	return handler(s, cmd)
-}
-
-func (c *commands) register(name string, f commandHandlerFunc) {
-	c.Handlers[name] = f
+	db  *database.Queries
+	cfg *config.Config
 }
 
 func main() {
-	cfg, err := config.Read()
+	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("Error reading initial config: %v", err)
+		log.Fatalf("Error loading config: %v", err)
 	}
+
+	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("Error connecting to database: %v", err)
+	}
+	defer db.Close()
+
+	dbQueries := database.New(db)
+
 	appState := &state{
-		Config: &cfg,
+		db:  dbQueries,
+		cfg: cfg,
 	}
 
-	cmdRegistry := &commands{
-		Handlers: make(map[string]commandHandlerFunc),
-	}
-	cmdRegistry.register("login", handlerLogin)
-
-	args := os.Args
-
-	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "Error: Not enough arguments provided. Command name is required.")
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: go run . [command] [args]")
 		os.Exit(1)
 	}
+	command := os.Args[1]
+	args := os.Args[2:]
 
-	commandName := strings.ToLower(args[1])
-
-	commandArgs := args[2:]
-
-	currentCommand := command{
-		Name: commandName,
-		Args: commandArgs,
-	}
-
-	if err := cmdRegistry.run(appState, currentCommand); err != nil {
-		fmt.Fprintf(os.Stderr, "Error running command '%s': %v\n", commandName, err)
+	switch command {
+	case "register":
+		handleRegister(appState, args)
+	case "login":
+		handleLogin(appState, args)
+	default:
+		fmt.Printf("Unknown command: %s\n", command)
 		os.Exit(1)
 	}
+}
+
+func handleRegister(s *state, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Error: Please provide a name to register.")
+		os.Exit(1)
+	}
+	userName := args[0]
+	now := time.Now().UTC()
+
+	_, err := s.db.GetUser(context.Background(), userName)
+	if err == nil {
+		fmt.Printf("Error: User '%s' already exists.\n", userName)
+		os.Exit(1)
+	}
+	if err != sql.ErrNoRows {
+		log.Fatalf("Error checking for existing user: %v", err)
+	}
+
+	params := database.CreateUserParams{
+		ID:        uuid.New(),
+		CreatedAt: now,
+		UpdatedAt: now,
+		Name:      userName,
+	}
+
+	user, err := s.db.CreateUser(context.Background(), params)
+	if err != nil {
+		log.Fatalf("Error creating user: %v", err)
+	}
+
+	s.cfg.CurrentUserName = userName
+	if err := s.cfg.Save(); err != nil {
+		log.Fatalf("Error saving configuration: %v", err)
+	}
+
+	fmt.Printf("User '%s' registered and logged in.\n", userName)
+	fmt.Printf("Debug: User created: %+v\n", user)
+}
+
+func handleLogin(s *state, args []string) {
+	if len(args) == 0 {
+		fmt.Println("Error: Please provide a name to login.")
+		os.Exit(1)
+	}
+	userName := args[0]
+
+	_, err := s.db.GetUser(context.Background(), userName)
+	if err == sql.ErrNoRows {
+		fmt.Printf("Error: User '%s' does not exist.\n", userName)
+		os.Exit(1)
+	}
+	if err != nil {
+		log.Fatalf("Error checking for user: %v", err)
+	}
+
+	s.cfg.CurrentUserName = userName
+	if err := s.cfg.Save(); err != nil {
+		log.Fatalf("Error saving configuration: %v", err)
+	}
+
+	fmt.Printf("Logged in as user '%s'.\n", userName)
 }

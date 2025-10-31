@@ -4,13 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"os"
+	"time"
+
 	"github.com/Numpkens/gatorcli/internal/config"
 	"github.com/Numpkens/gatorcli/internal/database"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
-	"log"
-	"os"
-	"time"
 )
 
 type state struct {
@@ -24,6 +25,7 @@ func main() {
 		log.Fatalf("Error loading config: %v", err)
 	}
 
+	// 2. Open DB Connection
 	db, err := sql.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("Error connecting to database: %v", err)
@@ -49,6 +51,10 @@ func main() {
 		handleRegister(appState, args)
 	case "login":
 		handleLogin(appState, args)
+	case "reset":
+		handleReset(appState)
+	case "users": // <-- ADDED
+		handleUsers(appState) // <-- ADDED
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
 		os.Exit(1)
@@ -115,4 +121,35 @@ func handleLogin(s *state, args []string) {
 	}
 
 	fmt.Printf("Logged in as user '%s'.\n", userName)
+}
+
+func handleReset(s *state) {
+	err := s.db.DeleteAllUsers(context.Background())
+	if err != nil {
+		fmt.Printf("Error: Failed to reset database: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Database successfully reset (all users deleted).")
+}
+
+// ⭐️ NEW FUNCTION ⭐️
+func handleUsers(s *state) {
+	// Call the generated GetUsers query
+	users, err := s.db.GetUsers(context.Background())
+	if err != nil {
+		log.Fatalf("Error getting users: %v", err)
+	}
+
+	// Get the currently logged-in user name from the config
+	currentUserName := s.cfg.CurrentUserName
+
+	// Iterate and print in the specified format
+	for _, user := range users {
+		status := ""
+		if user.Name == currentUserName {
+			status = " (current)"
+		}
+		fmt.Printf("* %s%s\n", user.Name, status)
+	}
 }

@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/Numpkens/gatorcli/internal/config"
-	"github.com/Numpkens/gatorcli/internal/feed"
+	"github.com/Numpkens/gatorcli/internal/feed" // New import for the feed package
 )
 
 // state holds the application's current state, including a pointer to the configuration.

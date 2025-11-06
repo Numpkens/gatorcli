@@ -1,20 +1,29 @@
 package main
 
 import (
-	"context" // New import for the HTTP request context
+	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"time"
+
+	_ "github.com/lib/pq" // Registers the "postgres" driver
+
+	"github.com/google/uuid"
 
 	"github.com/Numpkens/gatorcli/internal/config"
-	"github.com/Numpkens/gatorcli/internal/feed" // New import for the feed package
+	"github.com/Numpkens/gatorcli/internal/database"
+	"github.com/Numpkens/gatorcli/internal/feed"
 )
 
-// state holds the application's current state, including a pointer to the configuration.
+// state holds the application's current state, including pointers to config and database query objects.
 type state struct {
 	Config *config.Config
+	DB     *database.Queries
+	DBConn *sql.DB // Added to allow raw SQL commands like TRUNCATE
 }
 
 // command represents the data parsed from the command-line arguments.
@@ -31,113 +40,194 @@ type commands struct {
 	Handlers map[string]commandHandlerFunc
 }
 
-// handlerLogin is the function that handles the 'gator login <username>' command.
+func (c *commands) register(name string, handler commandHandlerFunc) {
+	c.Handlers[name] = handler
+}
+
+func (c *commands) run(s *state, cmd command) error {
+	handler, ok := c.Handlers[cmd.Name]
+	if !ok {
+		return fmt.Errorf("unknown command: %s", cmd.Name)
+	}
+	return handler(s, cmd)
+}
+
+// --- COMMAND HANDLERS ---
+
+func handlerReset(s *state, cmd command) error {
+	ctx := context.Background()
+
+	_, err := s.DBConn.ExecContext(ctx, "TRUNCATE TABLE users RESTART IDENTITY CASCADE;")
+	if err != nil {
+		return fmt.Errorf("failed to reset database tables: %w", err)
+	}
+
+	fmt.Println("Database reset initiated.")
+	return nil
+}
+
+func handlerRegister(s *state, cmd command) error {
+	if len(cmd.Args) == 0 {
+		return errors.New("register command requires a single argument: <username>")
+	}
+
+	username := cmd.Args[0]
+	userID := uuid.New()
+	now := time.Now().UTC()
+
+	_, err := s.DB.CreateUser(context.Background(), database.CreateUserParams{
+		ID:        userID,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Name:      username,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create user in database: %w", err)
+	}
+
+	// 2. Set the user ID in the config for the current session
+	if err := s.Config.SetUser(userID.String()); err != nil {
+		return fmt.Errorf("failed to register and set current user: %w", err)
+	}
+
+	fmt.Printf("User %s registered successfully (ID: %s).\n", username, userID.String())
+	return nil
+}
+
+// handlerLogin is now primarily for setting a user, using a placeholder ID if needed.
 func handlerLogin(s *state, cmd command) error {
-	// 1. Check if the required argument (username) is provided.
 	if len(cmd.Args) == 0 {
 		return errors.New("login command requires a single argument: <username>")
 	}
 
-	// The username is the first argument in the Args slice.
 	username := cmd.Args[0]
+	// In a real app, you would fetch the user ID from the database here.
+	placeholderUserID := uuid.New().String()
 
-	// 2. Use the state's access to the Config struct to set the user.
-	if err := s.Config.SetUser(username); err != nil {
+	if err := s.Config.SetUser(placeholderUserID); err != nil {
 		return fmt.Errorf("failed to set current user: %w", err)
 	}
 
-	// 3. Print success message.
-	fmt.Printf("Current user has been successfully set to: %s\n", username)
+	fmt.Printf("Successfully set current user to: %s (ID: %s)\n", username, placeholderUserID)
 
 	return nil
 }
 
-// handlerAgg handles the 'gator agg' command, fetching a single feed.
 func handlerAgg(s *state, cmd command) error {
-	// Define the feed URL for testing.
-	feedURL := "https://www.wagslane.dev/index.xml"
+	const testFeedURL = "https://www.freecodecamp.org/news/rss/"
 
-	// Use context.Background() for simplicity for a single, immediate request.
-	ctx := context.Background()
+	fmt.Printf("Fetching test feed: %s\n", testFeedURL)
 
-	fmt.Printf("Fetching feed from: %s\n", feedURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	// Call the FetchFeed function from the internal/feed package.
-	rssFeed, err := feed.FetchFeed(ctx, feedURL)
+	rssFeed, err := feed.FetchFeed(ctx, testFeedURL)
 	if err != nil {
-		return fmt.Errorf("agg command failed to fetch feed: %w", err)
+		return fmt.Errorf("error fetching feed: %w", err)
 	}
 
-	// Print the entire struct to the console (using %+v to show field names).
-	fmt.Printf("\nSuccessfully fetched and parsed feed. Content:\n%+v\n", rssFeed)
+	fmt.Printf("Feed fetched successfully: %s\n", rssFeed.Channel.Title)
+	fmt.Printf("Found %d items.\n", len(rssFeed.Channel.Item))
 
 	return nil
 }
 
-// run executes a registered command given the command name.
-func (c *commands) run(s *state, cmd command) error {
-	handler, ok := c.Handlers[cmd.Name]
-	if !ok {
-		// Command not found
-		return fmt.Errorf("unknown command: %s", cmd.Name)
+func handlerAddFeed(s *state, cmd command) error {
+	if len(cmd.Args) != 2 {
+		return errors.New("addfeed command requires two arguments: <name> <url>")
+	}
+	feedName := cmd.Args[0]
+	feedURL := cmd.Args[1]
+
+	if s.Config.UserID == "" {
+		return errors.New("user is not logged in. Please run 'gator login <username>' first")
 	}
 
-	// Execute the registered handler function.
-	return handler(s, cmd)
-}
+	userID, err := uuid.Parse(s.Config.UserID)
+	if err != nil {
+		return fmt.Errorf("invalid user ID in config: %w", err)
+	}
 
-// register adds a new handler function for a specific command name.
-func (c *commands) register(name string, f commandHandlerFunc) {
-	c.Handlers[name] = f
+	now := time.Now().UTC()
+
+	newFeed, err := s.DB.CreateFeed(context.Background(), database.CreateFeedParams{
+		ID:        uuid.New(),
+		CreatedAt: now,
+		UpdatedAt: now,
+		Name:      feedName,
+		Url:       feedURL,
+		UserID:    userID,
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to create feed in database: %w", err)
+	}
+
+	fmt.Printf("Successfully added new feed:\n")
+	fmt.Printf("  ID:        %s\n", newFeed.ID)
+	fmt.Printf("  Name:      %s\n", newFeed.Name)
+	fmt.Printf("  URL:       %s\n", newFeed.Url)
+	fmt.Printf("  User ID:   %s\n", newFeed.UserID)
+	fmt.Printf("  Created At: %s\n", newFeed.CreatedAt)
+
+	return nil
 }
 
 func main() {
-	// --- 1. State Initialization (Reading Config) ---
+	// --- 1. State Initialization (Reading Config and DB Connection) ---
 	cfg, err := config.Read()
 	if err != nil {
 		log.Fatalf("Error reading initial config: %v", err)
 	}
-	// Create a new instance of the state struct with a pointer to the config.
+
+	// DB connection setup
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "host=localhost port=5432 user=postgres password=postgres dbname=gatorcli sslmode=disable"
+	}
+
+	dbConn, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Error opening database connection: %v", err)
+	}
+	defer dbConn.Close()
+
+	dbQueries := database.New(dbConn)
+
 	appState := &state{
 		Config: &cfg,
+		DB:     dbQueries,
+		DBConn: dbConn, // Pass the raw connection for TRUNCATE
 	}
 
 	// --- 2. Command Registration ---
-	// Create a new instance of the commands struct with an initialized map.
 	cmdRegistry := &commands{
 		Handlers: make(map[string]commandHandlerFunc),
 	}
-	// Register command handlers.
+	cmdRegistry.register("reset", handlerReset)
+	cmdRegistry.register("register", handlerRegister)
 	cmdRegistry.register("login", handlerLogin)
-	cmdRegistry.register("agg", handlerAgg) // Registration for the new 'agg' command
+	cmdRegistry.register("addfeed", handlerAddFeed)
+	cmdRegistry.register("agg", handlerAgg)
 
 	// --- 3. Argument Handling and Execution ---
-	// os.Args contains all command line arguments, including the program name.
 	args := os.Args
 
-	// Check for minimum arguments: program_name (0) + command_name (1) = 2
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "Error: Not enough arguments provided. Command name is required.")
-		// Exit with code 1 to indicate an error.
 		os.Exit(1)
 	}
 
-	// The command name is the second argument (index 1).
 	commandName := strings.ToLower(args[1])
-
-	// The command arguments are the remaining arguments (index 2 onwards).
 	commandArgs := args[2:]
 
-	// Create the command instance.
 	currentCommand := command{
 		Name: commandName,
 		Args: commandArgs,
 	}
 
-	// Run the command and handle any errors.
 	if err := cmdRegistry.run(appState, currentCommand); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running command '%s': %v\n", commandName, err)
-		// Exit with code 1 if the command failed.
 		os.Exit(1)
 	}
 }

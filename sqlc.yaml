@@ -3,6 +3,9 @@ sql:
   - schema: "sql/schema"
     queries: "sql/queries"
     engine: "postgresql"
+    # FIX: Use the nested structure to resolve the YAML parsing error
+    database:
+      uri: "postgres://postgres:postgres@localhost:5432/gatorcli?sslmode=disable"
     gen:
       go:
         out: "internal/database"

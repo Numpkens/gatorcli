@@ -131,21 +131,77 @@ func handlerLogin(s *state, cmd command) error {
 	return nil
 }
 
-func handlerAgg(s *state, cmd command) error {
-	const testFeedURL = "https://www.freecodecamp.org/news/rss/"
-	fmt.Printf("Fetching test feed: %s\n", testFeedURL)
+// New aggregation function
+func scrapeFeeds(s *state) {
+	ctx := context.Background()
+	now := time.Now().UTC()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	rssFeed, err := feed.FetchFeed(ctx, testFeedURL)
+	// 1. Get the next feed to fetch from the DB.
+	feed, err := s.DB.GetNextFeedToFetch(ctx)
 	if err != nil {
-		return fmt.Errorf("error fetching feed: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			// This is normal if there are no feeds in the DB
+			return
+		}
+		log.Printf("Error getting next feed to fetch: %v", err)
+		return
 	}
 
-	fmt.Printf("Feed fetched successfully: %s\n", rssFeed.Channel.Title)
-	fmt.Printf("Found %d items.\n", len(rssFeed.Channel.Item))
-	return nil
+	fmt.Printf(">> Fetching feed: %s from %s\n", feed.Name, feed.Url)
+
+	// 2. Mark it as fetched.
+	err = s.DB.MarkFeedFetched(ctx, database.MarkFeedFetchedParams{
+		ID:            feed.ID,
+		LastFetchedAt: now,
+		UpdatedAt:     now,
+	})
+	if err != nil {
+		log.Printf("Error marking feed %s as fetched: %v", feed.Name, err)
+	}
+
+	// 3. Fetch the feed using the URL.
+	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// NOTE: The feed.FetchFeed function is assumed to be available from the internal/feed package
+	rssFeed, err := feed.FetchFeed(fetchCtx, feed.Url)
+	if err != nil {
+		log.Printf("Error fetching RSS feed %s (%s): %v", feed.Name, feed.Url, err)
+		return
+	}
+
+	// 4. Iterate over items and print titles.
+	fmt.Printf("   Successfully fetched %d posts from %s\n", len(rssFeed.Channel.Item), feed.Name)
+	for _, item := range rssFeed.Channel.Item {
+		fmt.Printf("   - %s\n", item.Title)
+	}
+	fmt.Println("<< Done with feed.")
+}
+
+func handlerAgg(s *state, cmd command) error {
+	if len(cmd.Args) != 1 {
+		return errors.New("agg command requires a single argument: <time_between_reqs> (e.g., 30s, 1m)")
+	}
+	timeBetweenReqsStr := cmd.Args[0]
+
+	timeBetweenRequests, err := time.ParseDuration(timeBetweenReqsStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse duration string '%s'. Example formats: 1s, 30m, 1h: %w", timeBetweenReqsStr, err)
+	}
+
+	fmt.Printf("Collecting feeds every %s...\n", timeBetweenRequests)
+	fmt.Println("Press Ctrl+C to stop the process.")
+
+	ticker := time.NewTicker(timeBetweenRequests)
+	defer ticker.Stop()
+
+	// Run immediately
+	scrapeFeeds(s)
+
+	// Loop forever, running on every tick
+	for ; ; <-ticker.C {
+		scrapeFeeds(s)
+	}
 }
 
 func handlerAddFeed(s *state, cmd command, user database.User) error {
@@ -158,6 +214,7 @@ func handlerAddFeed(s *state, cmd command, user database.User) error {
 	userID := user.ID
 	now := time.Now().UTC()
 	feedID := uuid.New()
+	feedFollowID := uuid.New()
 
 	newFeed, err := s.DB.CreateFeed(context.Background(), database.CreateFeedParams{
 		ID:        feedID,
@@ -172,8 +229,11 @@ func handlerAddFeed(s *state, cmd command, user database.User) error {
 	}
 
 	_, err = s.DB.CreateFeedFollow(context.Background(), database.CreateFeedFollowParams{
-		UserID: userID,
-		FeedID: feedID,
+		ID:        feedFollowID,
+		CreatedAt: now,
+		UpdatedAt: now,
+		UserID:    userID,
+		FeedID:    feedID,
 	})
 	if err != nil {
 		log.Printf("Warning: Could not auto-create feed follow: %v", err)
@@ -234,9 +294,14 @@ func handlerFollow(s *state, cmd command, user database.User) error {
 		return fmt.Errorf("failed to look up feed: %w", err)
 	}
 
+	now := time.Now().UTC()
+	feedFollowID := uuid.New()
 	_, err = s.DB.CreateFeedFollow(context.Background(), database.CreateFeedFollowParams{
-		UserID: userID,
-		FeedID: feed.ID,
+		ID:        feedFollowID,
+		CreatedAt: now,
+		UpdatedAt: now,
+		UserID:    userID,
+		FeedID:    feed.ID,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key value violates unique constraint") {
@@ -259,10 +324,7 @@ func handlerFollow(s *state, cmd command, user database.User) error {
 
 func handlerFollowing(s *state, cmd command, user database.User) error {
 	userID := user.ID
-	follows, err := s.DB.GetFeedFollowsForUser(context.Background(), uuid.NullUUID{
-		UUID:  userID,
-		Valid: true,
-	})
+	follows, err := s.DB.GetFeedFollowsForUser(context.Background(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch feed follows: %w", err)
 	}

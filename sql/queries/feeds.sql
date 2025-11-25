@@ -16,8 +16,8 @@ JOIN users ON feeds.user_id = users.id
 ORDER BY feeds.created_at DESC;
 
 -- name: CreateFeedFollow :one
-INSERT INTO feed_follows (user_id, feed_id)
-VALUES (@user_id, @feed_id)
+INSERT INTO feed_follows (id, created_at, updated_at, user_id, feed_id)
+VALUES (@id, @created_at, @updated_at, @user_id, @feed_id)
 RETURNING *;
 
 -- name: GetFeedFollowForUserAndFeed :one
@@ -43,3 +43,15 @@ WHERE feed_follows.user_id = @user_id;
 DELETE FROM feed_follows
 WHERE feed_follows.user_id = @user_id
   AND feed_follows.feed_id = @feed_id;
+
+-- name: MarkFeedFetched :exec
+UPDATE feeds
+SET last_fetched_at = @last_fetched_at,
+    updated_at = @updated_at
+WHERE id = @id;
+
+-- name: GetNextFeedToFetch :one
+SELECT *
+FROM feeds
+ORDER BY last_fetched_at ASC NULLS FIRST
+LIMIT 1;

@@ -3,9 +3,8 @@ CREATE TABLE feed_follows (
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    feed_id UUID NOT NULL REFERENCES feeds(id) ON DELETE CASCADE
+    feed_id UUID NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+    
+    -- This constraint is essential for the application logic (unfollowing/following)
+    UNIQUE (user_id, feed_id)
 );
-
-
--- Down migration
-DROP TABLE feed_follows;
